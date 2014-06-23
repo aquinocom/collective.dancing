@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
+
 import datetime
 import operator
-
+ 
 from zope import component
 from zope import schema
 try:
@@ -28,8 +30,25 @@ from collective.singing.channel import channel_lookup
 from collective.singing.interfaces import ISubscriptionKey
 from collective.dancing import MessageFactory as _
 from collective.dancing.utils import switch_on
-from collective.dancing.events import ConfirmSubscriptionEvent, ConfirmUnsubscriptionEvent
-from zope.event import notify
+from Products.CMFCore.utils import getToolByName
+
+
+def notify_subscription_confirmed(subscription):
+    import zope.event
+    import zope.lifecycleevent
+    from collective.singing.interfaces import ISubscription
+
+    # XXX is this enough?
+    changes = {ISubscription: ['metadata']}
+
+    # Construct change-descriptions for the object-modified event
+    descriptions = []
+    for interface, names in changes.items():
+        descriptions.append(zope.lifecycleevent.Attributes(interface, *names))
+
+    # Send out a detailed object-modified event
+    zope.event.notify(
+        zope.lifecycleevent.ObjectModifiedEvent(subscription, *descriptions))
 
 
 class SubscribeForm(collective.singing.browser.subscribe.Subscribe):
@@ -116,7 +135,7 @@ class Confirm(BrowserView):
                     for sub in subscriptions:
                         if sub.metadata.get('pending', False):
                             sub.metadata['pending'] = False
-                            notify(ConfirmSubscriptionEvent(channel, sub))
+                            notify_subscription_confirmed(sub)
                     self.status = self.successMessage
                     break
             else:
@@ -136,14 +155,17 @@ class Unsubscribe(BrowserView):
 
     def __call__(self):
         secret = self.request.form['secret']
+
         if secret:
             subs = self.context.aq_inner.subscriptions
+
             subscriptions = subs.query(secret=secret)
 
             if len(subscriptions):
                 for sub in subscriptions:
+
                     subs.remove_subscription(sub)
-                    notify(ConfirmUnsubscriptionEvent(sub))
+                    
                 self.status = _(u"You unsubscribed successfully.")
             else:
                 self.status = _(u"You aren't subscribed to this mailing-list.")
@@ -226,10 +248,11 @@ class SubscriptionEditForm(IncludeHiddenSecret, form.EditForm):
                              name='unsubscribe')
     def handle_unsubscribe(self, action):
         secret = self.secret
+
         subs = self.context.channel.subscriptions
         for subscription in subs.query(secret=secret):
+
             subs.remove_subscription(subscription)
-            notify(ConfirmUnsubscriptionEvent(subscription))
         self.removed = self.context
         self.status = _(u"You unsubscribed successfully.")
 
@@ -312,6 +335,7 @@ class SubscriptionAddForm(IncludeHiddenSecret, form.Form):
             self.request, zope.i18n.interfaces.IUserPreferredLanguages)
         if pl is not None:
             metadata['languages'] = pl.getPreferredLanguages()
+
         # By using another method here we allow subclasses to override
         # what really happens here:
         self.add_subscription(
@@ -323,10 +347,6 @@ class SubscriptionAddForm(IncludeHiddenSecret, form.Form):
         try:
             self.added = self.context.subscriptions.add_subscription(
                 self.context, secret, comp_data, coll_data, metadata)
-            if secret and not self.added.metadata.get('pending', False):
-                #in this case the user subscribed himself in my-subscriptions.html
-                #panel and he doesn't need to confirm his subscription
-                notify(ConfirmSubscriptionEvent(context, self.added))
         except ValueError:
             self.added = None
             self.status = self.status_already_subscribed
@@ -562,7 +582,6 @@ class SubscriptionEditSubForm(SubscriptionSubForm):
     def update(self):
         def handleApply(self, action):
             data, errors = self.extractData()
-
             if not data.get(self.channel_selector):
                 self.unsubscribe()
                 return
@@ -593,7 +612,6 @@ class SubscriptionEditSubForm(SubscriptionSubForm):
         subs = self.context.channel.subscriptions
         for subscription in subs.query(secret=secret, format=format):
             subs.remove_subscription(subscription)
-            notify(ConfirmUnsubscriptionEvent(subscription))
         self.removed = self.context
         self.status = self.status_unsubscribed
 
@@ -625,6 +643,19 @@ class PrettySubscriptionsForm(IncludeHiddenSecret, form.EditForm):
                         if f not in self.key_fields:
                             self.key_fields.append(f)
         self.confirmation_sent = False
+
+    def getSelected(self, forms):
+        """
+        """
+        list_form = []
+        for i in forms:
+            try:
+                name = i.getContent().channel.title
+            except:
+                name = i.getContent().title
+            if 'selected' in i.widgets.values()[0].value:
+                list_form.append(name)
+        return list_form
 
     def status(self):
         if self.status_message:
@@ -672,14 +703,12 @@ class PrettySubscriptionsForm(IncludeHiddenSecret, form.EditForm):
 
     def updateWidgets(self):
         super(PrettySubscriptionsForm, self).updateWidgets()
-
         if self.subs and not self.unsubscribed_all:
             for kf in self.key_fields:
                 self.widgets[kf.getName()].disabled = 'disabled'
 
     def update(self):
         super(PrettySubscriptionsForm, self).update()
-
         # Let's set convert any 'pending' subscriptions to non-pending:
         for sub in self.subs:
             if sub.metadata.get('pending'):
@@ -695,6 +724,27 @@ class PrettySubscriptionsForm(IncludeHiddenSecret, form.EditForm):
             addform = SubscriptionAddSubForm(channel, self.request, self)
             addform.format = format
             self.subscription_addforms.append(addform)
+
+        # The edit forms might have deleted a subscription.  We'll
+        # take care of this while updating them:
+        list_remove_channel = []
+        for form in self.subscription_editforms:
+            form.update()
+            if form.removed:
+                try:
+                    list_remove_channel.append(form.context.channel.title)
+                except:
+                    pass
+                subscription = form.context
+                addform = SubscriptionAddSubForm(
+                    subscription.channel, self.request, self)
+                addform.format = subscription.metadata['format']
+                addform.ignoreRequest = True
+                addform.update()
+                self.subscription_addforms.append(addform)
+                addform.status = form.status
+            #elif form.status != form.noChangesMessage:
+            #    self.status = form.status
 
         # The edit forms might have deleted a subscription.  We'll
         # take care of this while updating them:
@@ -714,16 +764,55 @@ class PrettySubscriptionsForm(IncludeHiddenSecret, form.EditForm):
 
         # Let's update the add forms now.  One of them may have added
         # a subscription:
+        list_add_channel = []
         for form in self.subscription_addforms:
             form.update()
             subscription = form.added
             if subscription is not None:
+                try:
+                    list_add_channel.append(form.context.title)
+                except:
+                    pass
                 editform = SubscriptionEditSubForm(
                     subscription, self.request, self)
                 editform.update()
                 self.subscription_editforms.append(editform)
                 #_(u"You subscribed successfully.")
                 editform.status = form.status
+
+        if list_remove_channel or list_add_channel or self.unsubscribed_all:
+            mhost = getToolByName(self.context, 'MailHost')
+            email_user = self.request.form.get('form.widgets.email')
+            selected = self.getSelected(self.forms)
+            messageText = 'O usuario ' + email_user + ' alterou as seguintes configuracoes: \n'
+            if list_remove_channel:
+                remove_channel = ''
+                for i in list_remove_channel:
+                    remove_channel += i
+                    if i != list_remove_channel[-1]:
+                        remove_channel += ', '
+                messageText += 'Removeu os canais: ' + remove_channel + '. \n'
+            if list_add_channel:
+                add_channel = ''
+                for i in list_add_channel:
+                    add_channel += i
+                    if i != list_add_channel[-1]:
+                        add_channel += ', '
+                messageText += 'Adicionou os canais: ' + add_channel + '. \n'
+            if selected:
+                selected_channel = ''
+                for i in selected:
+                    selected_channel += i
+                    if i != selected[-1]:
+                        selected_channel += ', '
+                messageText += 'Configuracao atual: ' + selected_channel + '. \n'
+                
+            #variaveis que definem os emails de envio para o admin
+            #Verificar se existe a propriedade em portal_newsletters -->  sendto_admin
+            mto = self.context.getProperty('sendto_admin')
+            mfrom = self.context.aq_parent.getProperty('email_from_address')
+            subject = 'Alteração de configuração pessoais no clipping'
+            mhost.send(messageText, mto, mfrom, subject)
 
         # check if all subscriptions are now cancelled
         if not sum([len(c.subscriptions.query(secret=self.secret)) \
