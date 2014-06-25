@@ -808,8 +808,8 @@ class PrettySubscriptionsForm(IncludeHiddenSecret, form.EditForm):
                 messageText += 'Configuracao atual: ' + selected_channel + '. \n'
                 
             #variaveis que definem os emails de envio para o admin
-            #Verificar se existe a propriedade em portal_newsletters -->  sendto_admin
-            mto = self.context.getProperty('sendto_admin')
+            #Verificar se existe a propriedade em portal_newsletters -->  report_to
+            mto = self.context.getProperty('report_to')
             mfrom = self.context.aq_parent.getProperty('email_from_address')
             subject = 'Alteração de configuração pessoais no clipping'
             mhost.send(messageText, mto, mfrom, subject)
